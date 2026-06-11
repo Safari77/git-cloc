@@ -10,10 +10,16 @@ Methodology: "Survivor Lines" (Current Ownership)
    - Metadata is parsed once per commit (efficient).
    - Content is read directly from the stream.
 
+Caveat: each author's lines are extracted into a separate file before
+counting, so cloc loses surrounding block-comment context. A line owned
+by author A inside author B's /* ... */ block may be classified as code
+instead of comment (or vice versa). Total line attribution is exact;
+the blank/comment/code split is approximate for interleaved authorship.
+
 Usage:
-  python3 git_cloc.py                       # All files, text output
-  python3 git_cloc.py --commit=v2.6.39      # Analyze specific tag
-  python3 git_cloc.py --extra-options="-C"  # Detect copies
+  python3 git-cloc.py                       # All files, text output
+  python3 git-cloc.py --commit=v2.6.39      # Analyze specific tag
+  python3 git-cloc.py --extra-options="-C"  # Detect copies
 """
 
 """
@@ -62,17 +68,22 @@ _worker_temp_dir = None
 _worker_blame_args = None
 _worker_commit_ref = None
 
-def run_command(cmd_list, cwd=None, binary=False):
+def run_command(cmd_list, cwd=None, binary=False, check=False):
     """
     Executes command directly without an intermediate shell.
     cmd_list must be a list of strings: ["git", "blame", ...]
+    With check=True a failing command raises CalledProcessError instead
+    of silently returning an empty result.
     """
     try:
         # shell=False is the default. We execute the binary directly.
         # bufsize increased to optimize stream reading.
-        out = subprocess.check_output(cmd_list, cwd=cwd, bufsize=1024*1024)
+        out = subprocess.check_output(cmd_list, cwd=cwd, bufsize=1024*1024,
+                                      stderr=subprocess.DEVNULL)
         return out if binary else out.decode('utf-8', errors='ignore')
     except subprocess.CalledProcessError:
+        if check:
+            raise
         return b"" if binary else ""
 
 def get_all_cloc_extensions():
@@ -111,7 +122,11 @@ def decode_author_name(raw_name):
         return raw_name
 
 def get_visual_width(s):
-    return wcswidth(str(s))
+    # wcswidth returns -1 for strings containing non-printable characters;
+    # fall back to len() so padding math stays sane.
+    s = str(s)
+    width = wcswidth(s)
+    return width if width >= 0 else len(s)
 
 def pad_col(text, width):
     text = str(text)
@@ -167,8 +182,8 @@ def process_file_task(filepath):
     if not blame_out:
         return {}
 
-    # Regex for the header line: 40 hex chars, space, numbers...
-    header_pattern = re.compile(r'^([0-9a-f]{40}) \d+ \d+')
+    # Regex for the header line: 40 hex chars (64 in SHA-256 repos), space, numbers...
+    header_pattern = re.compile(r'^([0-9a-f]{40,64}) \d+ \d+')
 
     lines = blame_out.split('\n')
 
@@ -232,11 +247,14 @@ def process_file_task(filepath):
 
     # Write files for CLOC
     for auth_hash, content_lines in file_structure.items():
-        safe_filepath = filepath.lstrip(os.sep)
+        safe_filepath = filepath.lstrip('/')
         auth_dir = os.path.join(temp_dir, auth_hash)
-        target_path = os.path.join(auth_dir, safe_filepath)
+        target_path = os.path.abspath(os.path.join(auth_dir, safe_filepath))
 
-        if not os.path.commonprefix([os.path.abspath(target_path), auth_dir]) == auth_dir:
+        # Component-aware containment check. os.path.commonprefix is
+        # character based (/tmp/abcd would pass against /tmp/abc), so
+        # compare with a trailing separator instead.
+        if not target_path.startswith(auth_dir + os.sep):
             continue
 
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
@@ -291,10 +309,11 @@ def main():
     parser.add_argument('--format', choices=['text', 'json', 'csv'], default='text', help='Output format')
     parser.add_argument('--per-file', action='store_true', help="Show stats per file (Text mode only)")
     parser.add_argument('--email', action='store_true', help="Show author email")
-    parser.add_argument('--threads', type=int, default=cpu_count(), help='Number of threads (default: CPU count)')
+    parser.add_argument('--threads', type=int, default=cpu_count(), help='Number of worker processes (default: CPU count)')
     parser.add_argument('--debug', action='store_true', help="Show debug info")
     parser.add_argument('--verbose', action='store_true', help="Show progress")
     args = parser.parse_args()
+    num_workers = max(1, args.threads)
 
     if shutil.which('cloc') is None:
         print("Error: 'cloc' is not installed or not in PATH.")
@@ -315,13 +334,28 @@ def main():
     else:
         active_extensions = DEFAULT_EXTENSIONS
 
+    if not active_extensions:
+        if args.extensions and args.extensions.lower() == 'all':
+            print("Error: Could not parse extension list from 'cloc --show-ext'.")
+        else:
+            print("Error: No valid extensions given.")
+        sys.exit(1)
+
     try:
-        git_root = run_command(["git", "rev-parse", "--show-toplevel"]).strip()
-    except Exception:
-        print("Error: Not a git repository.")
+        git_root = run_command(["git", "rev-parse", "--show-toplevel"], check=True).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("Error: Not a git repository (or 'git' is not installed).")
         sys.exit(1)
 
     os.chdir(git_root)
+
+    # Validate the commit early so a typo gives a clear error instead of
+    # an empty file list ("No files matched criteria").
+    try:
+        run_command(["git", "rev-parse", "--verify", "--quiet", args.commit + "^{commit}"], check=True)
+    except subprocess.CalledProcessError:
+        print(f"Error: Cannot resolve commit '{args.commit}'.")
+        sys.exit(1)
 
     if args.verbose: print(f"[*] Searching files in {args.commit}...")
 
@@ -332,7 +366,7 @@ def main():
         base_cmd.extend(args.pathspecs)
 
     try:
-        files_raw = run_command(base_cmd)
+        files_raw = run_command(base_cmd, check=True)
         all_files = files_raw.split('\0')
     except Exception as e:
         print(f"Error listing files: {e}")
@@ -354,7 +388,7 @@ def main():
         sys.exit(0)
 
     total_files = len(files_to_process)
-    if args.verbose: print(f"[*] Found {total_files} files to process with {args.threads} threads.")
+    if args.verbose: print(f"[*] Found {total_files} files to process with {num_workers} workers.")
 
     # Build LIST for blame arguments
     blame_args_list = []
@@ -369,15 +403,15 @@ def main():
         processed_count = 0
 
         # Pass 'blame_args_list' (which is a LIST) to worker
-        with Pool(processes=args.threads, initializer=init_worker,
+        with Pool(processes=num_workers, initializer=init_worker,
                   initargs=(git_root, temp_dir, blame_args_list, args.commit)) as pool:
 
             for partial_map in pool.imap_unordered(process_file_task, files_to_process):
                 processed_count += 1
                 global_author_map.update(partial_map)
                 if args.verbose:
-                    pct = (processed_count / len(files_to_process)) * 100
-                    print(f"\r[*] Processing: [{processed_count}/{len(files_to_process)}] {pct:.1f}%", end="", flush=True)
+                    pct = (processed_count / total_files) * 100
+                    print(f"\r[*] Processing: [{processed_count}/{total_files}] {pct:.1f}%", end="", flush=True)
 
         if args.verbose: print("\n[*] Running cloc...")
 
@@ -460,12 +494,12 @@ def main():
 
                 if args.email:
                     print(f"{pad_col('AUTHOR', w_auth)} {pad_col('EMAIL', w_email)} {pad_col('FILE', w_path)} {'BLANK':>8} {'COMMENT':>8} {'CODE':>8}")
-                    print("-" * (w_auth + w_email + w_path + 30))
+                    print("-" * (w_auth + w_email + w_path + 29))
                     for r in results:
                         print(f"{pad_col(r['author'], w_auth)} {pad_col(r['email'], w_email)} {pad_col(r['path'], w_path)} {r['blank']:>8} {r['comment']:>8} {r['code']:>8}")
                 else:
                     print(f"{pad_col('AUTHOR', w_auth)} {pad_col('FILE', w_path)} {'BLANK':>8} {'COMMENT':>8} {'CODE':>8}")
-                    print("-" * (w_auth + w_path + 30))
+                    print("-" * (w_auth + w_path + 28))
                     for r in results:
                         print(f"{pad_col(r['author'], w_auth)} {pad_col(r['path'], w_path)} {r['blank']:>8} {r['comment']:>8} {r['code']:>8}")
             else:
