@@ -11,7 +11,7 @@ Methodology: "Survivor Lines" (Current Ownership)
    - Content is read directly from the stream.
 
 Caveat: each author's lines are extracted into a separate file before
-counting, so cloc loses surrounding block-comment context. A line owned
+counting, so tokei loses surrounding block-comment context. A line owned
 by author A inside author B's /* ... */ block may be classified as code
 instead of comment (or vice versa). Total line attribution is exact;
 the blank/comment/code split is approximate for interleaved authorship.
@@ -104,27 +104,6 @@ def run_command(cmd_list, cwd=None, binary=False, check=False):
         if check:
             raise
         return b'' if binary else ''
-
-
-def get_all_cloc_extensions():
-    try:
-        out = run_command(['cloc', '--show-ext'])
-    except Exception:
-        return ()
-    exts = []
-    lines = out.splitlines()
-    start_parsing = False
-    for line in lines:
-        if line.startswith('---------'):
-            start_parsing = True
-            continue
-        if start_parsing:
-            parts = line.split()
-            if parts:
-                ext = parts[0].strip()
-                if ext:
-                    exts.append('.' + ext)
-    return tuple(exts)
 
 
 def decode_author_name(raw_name):
@@ -276,7 +255,7 @@ def process_file_task(filepath):
             if current_commit_hash and current_commit_hash in pending_metadata:
                 pending_metadata[current_commit_hash]['author-mail'] = line[12:].strip()
 
-    # Write files for CLOC
+    # Write files for tokei
     for auth_hash, content_lines in file_structure.items():
         safe_filepath = filepath.lstrip('/')
         auth_dir = os.path.join(temp_dir, auth_hash)
@@ -337,12 +316,17 @@ def draw_bar(count, total, width=30):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Compute lines of code per git author using cloc.')
+    parser = argparse.ArgumentParser(
+        description='Compute lines of code per git author using tokei.'
+    )
     parser.add_argument('pathspecs', nargs='*', help='Files or dirs to process (default: all)')
     parser.add_argument(
         '--exclude', action='append', help='Glob pattern to exclude (e.g. *.test.js)'
     )
-    parser.add_argument('--extensions', help="Comma separated (e.g. 'py,rs') or 'all'")
+    parser.add_argument(
+        '--extensions',
+        help="Comma separated (e.g. 'py,rs') or 'all' (no filter; tokei classifies every file)",
+    )
     parser.add_argument(
         '--commit', default='HEAD', help='Git commit/tag to analyze (default: HEAD)'
     )
@@ -365,13 +349,17 @@ def main():
     args = parser.parse_args()
     num_workers = max(1, args.threads)
 
-    if shutil.which('cloc') is None:
-        print("Error: 'cloc' is not installed or not in PATH.")
+    if shutil.which('tokei') is None:
+        print("Error: 'tokei' is not installed or not in PATH.")
         sys.exit(1)
 
     if args.extensions:
         if args.extensions.lower() == 'all':
-            active_extensions = get_all_cloc_extensions()
+            # No extension filter: blame every tracked file and let tokei
+            # decide what it can classify. This also covers files tokei
+            # recognizes by full name (e.g. Makefile, Dockerfile), which
+            # an extension list could never match.
+            active_extensions = None
         else:
             parts = args.extensions.split(',')
             cleaned = []
@@ -386,11 +374,8 @@ def main():
     else:
         active_extensions = DEFAULT_EXTENSIONS
 
-    if not active_extensions:
-        if args.extensions and args.extensions.lower() == 'all':
-            print("Error: Could not parse extension list from 'cloc --show-ext'.")
-        else:
-            print('Error: No valid extensions given.')
+    if active_extensions is not None and not active_extensions:
+        print('Error: No valid extensions given.')
         sys.exit(1)
 
     try:
@@ -433,7 +418,7 @@ def main():
     for f in all_files:
         if not f:
             continue
-        if not f.endswith(active_extensions):
+        if active_extensions is not None and not f.endswith(active_extensions):
             continue
         if any(fnmatch.fnmatch(f, pat) for pat in excludes):
             continue
@@ -478,50 +463,58 @@ def main():
                     )
 
         if args.verbose:
-            print('\n[*] Running cloc...')
+            print('\n[*] Running tokei...')
 
-        # Run cloc directly as a LIST
-        cloc_cmd = ['cloc', '--json', '--by-file', '--quiet', temp_dir]
+        # Run tokei directly as a LIST.
+        # --hidden/--no-ignore: the temp dir is outside any repo, but make
+        # sure tokei never skips extracted files due to hidden names or
+        # stray ignore files.
+        tokei_cmd = ['tokei', '--output', 'json', '--files', '--hidden', '--no-ignore', temp_dir]
         try:
-            cloc_out = run_command(cloc_cmd)
-            cloc_data = json.loads(cloc_out)
+            tokei_out = run_command(tokei_cmd, check=True)
+            tokei_data = json.loads(tokei_out)
         except Exception as e:
-            print(f'Error running cloc: {e}')
+            print(f'Error running tokei: {e}')
             sys.exit(1)
 
         results = []
         total_code_lines = 0
 
-        for key, stats in cloc_data.items():
-            if key == 'header' or key == 'SUM':
+        # Tokei JSON: { "<Language>": { "reports": [ { "name": <path>,
+        # "stats": { "blanks": N, "code": N, "comments": N, ... } }, ... ],
+        # ... }, "Total": {...} }
+        for language, lang_data in tokei_data.items():
+            if language == 'Total':
                 continue
-            real_key_path = os.path.realpath(key)
-            try:
-                rel_path = os.path.relpath(real_key_path, temp_dir)
-            except ValueError:
-                continue
+            for report in lang_data.get('reports', []):
+                real_key_path = os.path.realpath(report.get('name', ''))
+                try:
+                    rel_path = os.path.relpath(real_key_path, temp_dir)
+                except ValueError:
+                    continue
 
-            parts = rel_path.split(os.sep)
-            if len(parts) < 2:
-                continue
+                parts = rel_path.split(os.sep)
+                if len(parts) < 2:
+                    continue
 
-            auth_hash = parts[0]
-            name_email = global_author_map.get(auth_hash, ('Unknown', ''))
+                auth_hash = parts[0]
+                name_email = global_author_map.get(auth_hash, ('Unknown', ''))
 
-            real_file_path = os.path.join(*parts[1:])
-            code_count = stats.get('code', 0)
-            total_code_lines += code_count
+                real_file_path = os.path.join(*parts[1:])
+                stats = report.get('stats', {})
+                code_count = stats.get('code', 0)
+                total_code_lines += code_count
 
-            results.append(
-                {
-                    'author': name_email[0],
-                    'email': name_email[1],
-                    'path': real_file_path,
-                    'blank': stats.get('blank', 0),
-                    'comment': stats.get('comment', 0),
-                    'code': code_count,
-                }
-            )
+                results.append(
+                    {
+                        'author': name_email[0],
+                        'email': name_email[1],
+                        'path': real_file_path,
+                        'blank': stats.get('blanks', 0),
+                        'comment': stats.get('comments', 0),
+                        'code': code_count,
+                    }
+                )
 
         if not results:
             if args.format == 'json':
