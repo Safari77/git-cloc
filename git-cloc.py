@@ -55,11 +55,28 @@ from multiprocessing import Pool, cpu_count
 try:
     from wcwidth import wcswidth
 except ImportError:
-    def wcswidth(s): return len(s)
+
+    def wcswidth(s):
+        return len(s)
+
 
 DEFAULT_EXTENSIONS = (
-    '.rs', '.c', '.h', '.cpp', '.cc', '.hpp', '.go', '.py', '.js', '.ts',
-    '.java', '.cs', '.pl', '.rb', '.php', '.sh'
+    '.rs',
+    '.c',
+    '.h',
+    '.cpp',
+    '.cc',
+    '.hpp',
+    '.go',
+    '.py',
+    '.js',
+    '.ts',
+    '.java',
+    '.cs',
+    '.pl',
+    '.rb',
+    '.php',
+    '.sh',
 )
 
 # Global variables for worker processes
@@ -67,6 +84,7 @@ _worker_git_root = None
 _worker_temp_dir = None
 _worker_blame_args = None
 _worker_commit_ref = None
+
 
 def run_command(cmd_list, cwd=None, binary=False, check=False):
     """
@@ -78,35 +96,39 @@ def run_command(cmd_list, cwd=None, binary=False, check=False):
     try:
         # shell=False is the default. We execute the binary directly.
         # bufsize increased to optimize stream reading.
-        out = subprocess.check_output(cmd_list, cwd=cwd, bufsize=1024*1024,
-                                      stderr=subprocess.DEVNULL)
+        out = subprocess.check_output(
+            cmd_list, cwd=cwd, bufsize=1024 * 1024, stderr=subprocess.DEVNULL
+        )
         return out if binary else out.decode('utf-8', errors='ignore')
     except subprocess.CalledProcessError:
         if check:
             raise
-        return b"" if binary else ""
+        return b'' if binary else ''
+
 
 def get_all_cloc_extensions():
     try:
-        out = run_command(["cloc", "--show-ext"])
+        out = run_command(['cloc', '--show-ext'])
     except Exception:
         return ()
     exts = []
     lines = out.splitlines()
     start_parsing = False
     for line in lines:
-        if line.startswith("---------"):
+        if line.startswith('---------'):
             start_parsing = True
             continue
         if start_parsing:
             parts = line.split()
             if parts:
                 ext = parts[0].strip()
-                if ext: exts.append('.' + ext)
+                if ext:
+                    exts.append('.' + ext)
     return tuple(exts)
 
+
 def decode_author_name(raw_name):
-    if "=?" not in raw_name:
+    if '=?' not in raw_name:
         return raw_name
     try:
         parts = email.header.decode_header(raw_name)
@@ -117,9 +139,10 @@ def decode_author_name(raw_name):
                 decoded_parts.append(content.decode(enc, errors='ignore'))
             else:
                 decoded_parts.append(str(content))
-        return "".join(decoded_parts)
+        return ''.join(decoded_parts)
     except Exception:
         return raw_name
+
 
 def get_visual_width(s):
     # wcswidth returns -1 for strings containing non-printable characters;
@@ -128,11 +151,13 @@ def get_visual_width(s):
     width = wcswidth(s)
     return width if width >= 0 else len(s)
 
+
 def pad_col(text, width):
     text = str(text)
     vis_len = get_visual_width(text)
     padding = max(0, width - vis_len)
-    return text + " " * padding
+    return text + ' ' * padding
+
 
 def init_worker(git_root, temp_dir, blame_args, commit_ref):
     global _worker_git_root, _worker_temp_dir, _worker_blame_args, _worker_commit_ref
@@ -140,6 +165,7 @@ def init_worker(git_root, temp_dir, blame_args, commit_ref):
     _worker_temp_dir = temp_dir
     _worker_blame_args = blame_args
     _worker_commit_ref = commit_ref
+
 
 def process_file_task(filepath):
     """
@@ -149,15 +175,16 @@ def process_file_task(filepath):
     2. Optional metadata (author, email, etc.) - only appears once per commit.
     3. Content line: \t<content>
     """
-    if not filepath: return {}
+    if not filepath:
+        return {}
 
     git_root = _worker_git_root
     temp_dir = _worker_temp_dir
     blame_extra_args = _worker_blame_args
     commit_ref = _worker_commit_ref
 
-    local_author_map = {} # Hash -> (Name, Email)
-    file_structure = {}   # AuthHash -> [Lines]
+    local_author_map = {}  # Hash -> (Name, Email)
+    file_structure = {}  # AuthHash -> [Lines]
 
     # Cache for commit metadata: CommitHash -> AuthID
     commit_cache = {}
@@ -168,11 +195,11 @@ def process_file_task(filepath):
     try:
         # Construct command as a LIST. No shell quoting needed.
         # ["git", "blame", "--porcelain", arg1, arg2, commit, "--", path]
-        cmd = ["git", "blame", "--porcelain", "--encoding=utf-8"]
+        cmd = ['git', 'blame', '--porcelain', '--encoding=utf-8']
         if blame_extra_args:
             cmd.extend(blame_extra_args)
         cmd.append(commit_ref)
-        cmd.append("--")
+        cmd.append('--')
         cmd.append(filepath)
 
         blame_out = run_command(cmd, cwd=git_root)
@@ -191,11 +218,12 @@ def process_file_task(filepath):
     pending_metadata = {}
 
     for line in lines:
-        if not line: continue
+        if not line:
+            continue
 
         # 1. Content Line (prefixed by TAB)
         if line.startswith('\t'):
-            content = line[1:] # Strip the leading tab
+            content = line[1:]  # Strip the leading tab
 
             # Identify Author
             auth_id = commit_cache.get(current_commit_hash)
@@ -208,7 +236,7 @@ def process_file_task(filepath):
                 email = pm.get('author-mail', '').replace('<', '').replace('>', '')
 
                 # Hash Name + Email
-                identity_str = f"{name} {email}"
+                identity_str = f'{name} {email}'
                 auth_id = hashlib.sha256(identity_str.encode('utf-8')).hexdigest()
 
                 commit_cache[current_commit_hash] = auth_id
@@ -217,9 +245,9 @@ def process_file_task(filepath):
 
             if not auth_id:
                 # Fallback if git blame gave us absolutely nothing for this hash
-                auth_id = "unknown_author"
+                auth_id = 'unknown_author'
                 if auth_id not in local_author_map:
-                    local_author_map[auth_id] = ("Unknown", "")
+                    local_author_map[auth_id] = ('Unknown', '')
 
             if auth_id not in file_structure:
                 file_structure[auth_id] = []
@@ -231,7 +259,10 @@ def process_file_task(filepath):
         if match:
             current_commit_hash = match.group(1)
             # If this is a new commit we haven't seen metadata for, init buffer
-            if current_commit_hash not in commit_cache and current_commit_hash not in pending_metadata:
+            if (
+                current_commit_hash not in commit_cache
+                and current_commit_hash not in pending_metadata
+            ):
                 pending_metadata[current_commit_hash] = {}
             continue
 
@@ -266,6 +297,7 @@ def process_file_task(filepath):
 
     return local_author_map
 
+
 def get_max_lengths(data_rows):
     if not data_rows:
         return 10, 20, 20
@@ -278,40 +310,58 @@ def get_max_lengths(data_rows):
         len_path = max(get_visual_width(r['path']) for r in data_rows)
     return max(len_auth, 10), max(len_email, 10), max(len_path, 20)
 
+
 def draw_bar(count, total, width=30):
-    if total == 0: return ""
+    if total == 0:
+        return ''
     pct = count / total
     total_subblocks = pct * width * 8
     full_blocks = int(total_subblocks // 8)
     remainder = int(total_subblocks % 8)
-    blocks = ["", "\u258f", "\u258e", "\u258d", "\u258c", "\u258b", "\u258a", "\u2589"]
+    blocks = ['', '\u258f', '\u258e', '\u258d', '\u258c', '\u258b', '\u258a', '\u2589']
 
-    bar_str = "\u2588" * full_blocks
+    bar_str = '\u2588' * full_blocks
     if remainder > 0:
         bar_str += blocks[remainder]
 
     if full_blocks == 0 and remainder == 0 and count > 0:
-        bar_str = "\u258f"
+        bar_str = '\u258f'
 
-    current_visual_len = full_blocks + (1 if (remainder > 0 or (count > 0 and full_blocks == 0)) else 0)
+    current_visual_len = full_blocks + (
+        1 if (remainder > 0 or (count > 0 and full_blocks == 0)) else 0
+    )
     padding = width - current_visual_len
-    track = "\u2e31" * max(0, padding)
+    track = '\u2e31' * max(0, padding)
 
-    return f"{bar_str}{track} {pct * 100:>6.2f}%"
+    return f'{bar_str}{track} {pct * 100:>6.2f}%'
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Compute lines of code per git author using cloc.")
+    parser = argparse.ArgumentParser(description='Compute lines of code per git author using cloc.')
     parser.add_argument('pathspecs', nargs='*', help='Files or dirs to process (default: all)')
-    parser.add_argument('--exclude', action='append', help='Glob pattern to exclude (e.g. *.test.js)')
+    parser.add_argument(
+        '--exclude', action='append', help='Glob pattern to exclude (e.g. *.test.js)'
+    )
     parser.add_argument('--extensions', help="Comma separated (e.g. 'py,rs') or 'all'")
-    parser.add_argument('--commit', default='HEAD', help='Git commit/tag to analyze (default: HEAD)')
+    parser.add_argument(
+        '--commit', default='HEAD', help='Git commit/tag to analyze (default: HEAD)'
+    )
     parser.add_argument('--extra-options', help='Pass extra options to git blame (e.g. "-C -w")')
-    parser.add_argument('--format', choices=['text', 'json', 'csv'], default='text', help='Output format')
-    parser.add_argument('--per-file', action='store_true', help="Show stats per file (Text mode only)")
-    parser.add_argument('--email', action='store_true', help="Show author email")
-    parser.add_argument('--threads', type=int, default=cpu_count(), help='Number of worker processes (default: CPU count)')
-    parser.add_argument('--debug', action='store_true', help="Show debug info")
-    parser.add_argument('--verbose', action='store_true', help="Show progress")
+    parser.add_argument(
+        '--format', choices=['text', 'json', 'csv'], default='text', help='Output format'
+    )
+    parser.add_argument(
+        '--per-file', action='store_true', help='Show stats per file (Text mode only)'
+    )
+    parser.add_argument('--email', action='store_true', help='Show author email')
+    parser.add_argument(
+        '--threads',
+        type=int,
+        default=cpu_count(),
+        help='Number of worker processes (default: CPU count)',
+    )
+    parser.add_argument('--debug', action='store_true', help='Show debug info')
+    parser.add_argument('--verbose', action='store_true', help='Show progress')
     args = parser.parse_args()
     num_workers = max(1, args.threads)
 
@@ -327,8 +377,10 @@ def main():
             cleaned = []
             for p in parts:
                 p = p.strip()
-                if not p: continue
-                if not p.startswith('.'): p = '.' + p
+                if not p:
+                    continue
+                if not p.startswith('.'):
+                    p = '.' + p
                 cleaned.append(p)
             active_extensions = tuple(cleaned)
     else:
@@ -338,11 +390,11 @@ def main():
         if args.extensions and args.extensions.lower() == 'all':
             print("Error: Could not parse extension list from 'cloc --show-ext'.")
         else:
-            print("Error: No valid extensions given.")
+            print('Error: No valid extensions given.')
         sys.exit(1)
 
     try:
-        git_root = run_command(["git", "rev-parse", "--show-toplevel"], check=True).strip()
+        git_root = run_command(['git', 'rev-parse', '--show-toplevel'], check=True).strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         print("Error: Not a git repository (or 'git' is not installed).")
         sys.exit(1)
@@ -352,31 +404,35 @@ def main():
     # Validate the commit early so a typo gives a clear error instead of
     # an empty file list ("No files matched criteria").
     try:
-        run_command(["git", "rev-parse", "--verify", "--quiet", args.commit + "^{commit}"], check=True)
+        run_command(
+            ['git', 'rev-parse', '--verify', '--quiet', args.commit + '^{commit}'], check=True
+        )
     except subprocess.CalledProcessError:
         print(f"Error: Cannot resolve commit '{args.commit}'.")
         sys.exit(1)
 
-    if args.verbose: print(f"[*] Searching files in {args.commit}...")
+    if args.verbose:
+        print(f'[*] Searching files in {args.commit}...')
 
     # Build LIST for ls-tree
-    base_cmd = ["git", "ls-tree", "-r", "-z", "--name-only", args.commit]
+    base_cmd = ['git', 'ls-tree', '-r', '-z', '--name-only', args.commit]
     if args.pathspecs:
-        base_cmd.append("--")
+        base_cmd.append('--')
         base_cmd.extend(args.pathspecs)
 
     try:
         files_raw = run_command(base_cmd, check=True)
         all_files = files_raw.split('\0')
     except Exception as e:
-        print(f"Error listing files: {e}")
+        print(f'Error listing files: {e}')
         sys.exit(1)
 
     files_to_process = []
     excludes = args.exclude if args.exclude else []
 
     for f in all_files:
-        if not f: continue
+        if not f:
+            continue
         if not f.endswith(active_extensions):
             continue
         if any(fnmatch.fnmatch(f, pat) for pat in excludes):
@@ -384,11 +440,12 @@ def main():
         files_to_process.append(f)
 
     if not files_to_process:
-        print("No files matched criteria.")
+        print('No files matched criteria.')
         sys.exit(0)
 
     total_files = len(files_to_process)
-    if args.verbose: print(f"[*] Found {total_files} files to process with {num_workers} workers.")
+    if args.verbose:
+        print(f'[*] Found {total_files} files to process with {num_workers} workers.')
 
     # Build LIST for blame arguments
     blame_args_list = []
@@ -397,38 +454,47 @@ def main():
 
     with tempfile.TemporaryDirectory() as raw_temp_dir:
         temp_dir = os.path.realpath(raw_temp_dir)
-        if args.debug: print(f"[DEBUG] Temp dir: {temp_dir}")
+        if args.debug:
+            print(f'[DEBUG] Temp dir: {temp_dir}')
 
         global_author_map = {}
         processed_count = 0
 
         # Pass 'blame_args_list' (which is a LIST) to worker
-        with Pool(processes=num_workers, initializer=init_worker,
-                  initargs=(git_root, temp_dir, blame_args_list, args.commit)) as pool:
-
+        with Pool(
+            processes=num_workers,
+            initializer=init_worker,
+            initargs=(git_root, temp_dir, blame_args_list, args.commit),
+        ) as pool:
             for partial_map in pool.imap_unordered(process_file_task, files_to_process):
                 processed_count += 1
                 global_author_map.update(partial_map)
                 if args.verbose:
                     pct = (processed_count / total_files) * 100
-                    print(f"\r[*] Processing: [{processed_count}/{total_files}] {pct:.1f}%", end="", flush=True)
+                    print(
+                        f'\r[*] Processing: [{processed_count}/{total_files}] {pct:.1f}%',
+                        end='',
+                        flush=True,
+                    )
 
-        if args.verbose: print("\n[*] Running cloc...")
+        if args.verbose:
+            print('\n[*] Running cloc...')
 
         # Run cloc directly as a LIST
-        cloc_cmd = ["cloc", "--json", "--by-file", "--quiet", temp_dir]
+        cloc_cmd = ['cloc', '--json', '--by-file', '--quiet', temp_dir]
         try:
             cloc_out = run_command(cloc_cmd)
             cloc_data = json.loads(cloc_out)
         except Exception as e:
-            print(f"Error running cloc: {e}")
+            print(f'Error running cloc: {e}')
             sys.exit(1)
 
         results = []
         total_code_lines = 0
 
         for key, stats in cloc_data.items():
-            if key == "header" or key == "SUM": continue
+            if key == 'header' or key == 'SUM':
+                continue
             real_key_path = os.path.realpath(key)
             try:
                 rel_path = os.path.relpath(real_key_path, temp_dir)
@@ -436,27 +502,32 @@ def main():
                 continue
 
             parts = rel_path.split(os.sep)
-            if len(parts) < 2: continue
+            if len(parts) < 2:
+                continue
 
             auth_hash = parts[0]
-            name_email = global_author_map.get(auth_hash, ("Unknown", ""))
+            name_email = global_author_map.get(auth_hash, ('Unknown', ''))
 
             real_file_path = os.path.join(*parts[1:])
             code_count = stats.get('code', 0)
             total_code_lines += code_count
 
-            results.append({
-                'author': name_email[0],
-                'email': name_email[1],
-                'path': real_file_path,
-                'blank': stats.get('blank', 0),
-                'comment': stats.get('comment', 0),
-                'code': code_count
-            })
+            results.append(
+                {
+                    'author': name_email[0],
+                    'email': name_email[1],
+                    'path': real_file_path,
+                    'blank': stats.get('blank', 0),
+                    'comment': stats.get('comment', 0),
+                    'code': code_count,
+                }
+            )
 
         if not results:
-            if args.format == 'json': print("[]")
-            else: print("No results found.")
+            if args.format == 'json':
+                print('[]')
+            else:
+                print('No results found.')
             sys.exit(0)
 
         if args.debug and not args.email:
@@ -472,10 +543,14 @@ def main():
             collisions = {n: emails for n, emails in name_collision_map.items() if len(emails) > 1}
 
             if collisions:
-                print(f"[DEBUG] WARNING: The following authors share the same name but have different emails:")
+                print(
+                    f'[DEBUG] WARNING: The following authors share the same name but have different emails:'
+                )
                 for name, emails in collisions.items():
-                    print(f"  - {name}: {', '.join(emails)}")
-                print(f"[DEBUG] Recommendation: Use a .mailmap file to merge them or use --email to see distinctions.\n")
+                    print(f'  - {name}: {", ".join(emails)}')
+                print(
+                    f'[DEBUG] Recommendation: Use a .mailmap file to merge them or use --email to see distinctions.\n'
+                )
 
         if args.format == 'json':
             print(json.dumps(results, indent=2))
@@ -485,7 +560,9 @@ def main():
             header = ['author', 'email', 'path', 'blank', 'comment', 'code']
             writer.writerow(header)
             for r in results:
-                writer.writerow([r['author'], r['email'], r['path'], r['blank'], r['comment'], r['code']])
+                writer.writerow(
+                    [r['author'], r['email'], r['path'], r['blank'], r['comment'], r['code']]
+                )
 
         else:
             if args.per_file:
@@ -493,21 +570,35 @@ def main():
                 w_auth, w_email, w_path = get_max_lengths(results)
 
                 if args.email:
-                    print(f"{pad_col('AUTHOR', w_auth)} {pad_col('EMAIL', w_email)} {pad_col('FILE', w_path)} {'BLANK':>8} {'COMMENT':>8} {'CODE':>8}")
-                    print("-" * (w_auth + w_email + w_path + 29))
+                    print(
+                        f'{pad_col("AUTHOR", w_auth)} {pad_col("EMAIL", w_email)} {pad_col("FILE", w_path)} {"BLANK":>8} {"COMMENT":>8} {"CODE":>8}'
+                    )
+                    print('-' * (w_auth + w_email + w_path + 29))
                     for r in results:
-                        print(f"{pad_col(r['author'], w_auth)} {pad_col(r['email'], w_email)} {pad_col(r['path'], w_path)} {r['blank']:>8} {r['comment']:>8} {r['code']:>8}")
+                        print(
+                            f'{pad_col(r["author"], w_auth)} {pad_col(r["email"], w_email)} {pad_col(r["path"], w_path)} {r["blank"]:>8} {r["comment"]:>8} {r["code"]:>8}'
+                        )
                 else:
-                    print(f"{pad_col('AUTHOR', w_auth)} {pad_col('FILE', w_path)} {'BLANK':>8} {'COMMENT':>8} {'CODE':>8}")
-                    print("-" * (w_auth + w_path + 28))
+                    print(
+                        f'{pad_col("AUTHOR", w_auth)} {pad_col("FILE", w_path)} {"BLANK":>8} {"COMMENT":>8} {"CODE":>8}'
+                    )
+                    print('-' * (w_auth + w_path + 28))
                     for r in results:
-                        print(f"{pad_col(r['author'], w_auth)} {pad_col(r['path'], w_path)} {r['blank']:>8} {r['comment']:>8} {r['code']:>8}")
+                        print(
+                            f'{pad_col(r["author"], w_auth)} {pad_col(r["path"], w_path)} {r["blank"]:>8} {r["comment"]:>8} {r["code"]:>8}'
+                        )
             else:
                 agg = {}
                 for r in results:
                     a = r['author']
                     if a not in agg:
-                        agg[a] = {'email': r['email'], 'blank': 0, 'comment': 0, 'code': 0, 'files': 0}
+                        agg[a] = {
+                            'email': r['email'],
+                            'blank': 0,
+                            'comment': 0,
+                            'code': 0,
+                            'files': 0,
+                        }
                     agg[a]['blank'] += r['blank']
                     agg[a]['comment'] += r['comment']
                     agg[a]['code'] += r['code']
@@ -519,18 +610,27 @@ def main():
                 w_auth, w_email, _ = get_max_lengths(agg_rows)
 
                 if args.email:
-                    print(f"{pad_col('AUTHOR', w_auth)} {pad_col('EMAIL', w_email)} {'FILES':>8} {'CODE':>8}  {'DISTRIBUTION':<38}")
-                    print("-" * (w_auth + w_email + 59))
+                    print(
+                        f'{pad_col("AUTHOR", w_auth)} {pad_col("EMAIL", w_email)} {"FILES":>8} {"CODE":>8}  {"DISTRIBUTION":<38}'
+                    )
+                    print('-' * (w_auth + w_email + 59))
                 else:
-                    print(f"{pad_col('AUTHOR', w_auth)} {'FILES':>8} {'CODE':>8}  {'DISTRIBUTION':<38}")
-                    print("-" * (w_auth + 58))
+                    print(
+                        f'{pad_col("AUTHOR", w_auth)} {"FILES":>8} {"CODE":>8}  {"DISTRIBUTION":<38}'
+                    )
+                    print('-' * (w_auth + 58))
 
                 for auth, data in sorted_agg:
                     bar = draw_bar(data['code'], total_code_lines)
                     if args.email:
-                        print(f"{pad_col(auth, w_auth)} {pad_col(data['email'], w_email)} {data['files']:>8} {data['code']:>8}  {bar}")
+                        print(
+                            f'{pad_col(auth, w_auth)} {pad_col(data["email"], w_email)} {data["files"]:>8} {data["code"]:>8}  {bar}'
+                        )
                     else:
-                        print(f"{pad_col(auth, w_auth)} {data['files']:>8} {data['code']:>8}  {bar}")
+                        print(
+                            f'{pad_col(auth, w_auth)} {data["files"]:>8} {data["code"]:>8}  {bar}'
+                        )
 
-if __name__ == "__main__":
+
+if __name__ == '__main__':
     main()
